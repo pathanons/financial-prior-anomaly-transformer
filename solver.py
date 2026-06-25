@@ -509,25 +509,35 @@ class Solver(object):
         )
         fig, axes = plt.subplots(3, 2, figsize=(16, 12))
         dates = meta['dates']
-        axes[0, 0].plot(dates, meta['close'], label='close')
-        axes[0, 0].plot(dates, score / (np.nanmax(score) + 1e-8) * np.nanmax(meta['close']), label='score')
-        axes[0, 0].axvline(self.event_date, color='red')
+        x_axis = np.arange(len(dates))
+        tick_step = max(1, len(dates) // 6)
+        tick_pos = list(range(0, len(dates), tick_step))
+        if tick_pos[-1] != len(dates) - 1:
+            tick_pos.append(len(dates) - 1)
+        tick_labels = [dates[i] for i in tick_pos]
+
+        axes[0, 0].plot(x_axis, meta['close'], label='close')
+        axes[0, 0].plot(x_axis, score / (np.nanmax(score) + 1e-8) * np.nanmax(meta['close']), label='score')
+        axes[0, 0].axvline(event_pos, color='red')
         axes[0, 0].legend()
         for name in ['log_return_1d', 'volume_z', 'rolling_vol_20', 'vol_ratio_5_20']:
             if name in self.feature_cols:
-                axes[0, 1].plot(dates, x_np[:, self.feature_cols.index(name)], label=name)
-        axes[0, 1].axvline(self.event_date, color='red')
+                axes[0, 1].plot(x_axis, x_np[:, self.feature_cols.index(name)], label=name)
+        axes[0, 1].axvline(event_pos, color='red')
         axes[0, 1].legend()
         axes[1, 0].imshow(s_plot, aspect='auto')
         axes[1, 0].set_title('Series association')
         axes[1, 1].imshow(p_plot, aspect='auto')
         axes[1, 1].set_title('Prior association')
-        axes[2, 0].plot(dates, discrepancy)
-        axes[2, 0].axvline(self.event_date, color='red')
+        axes[2, 0].plot(x_axis, discrepancy)
+        axes[2, 0].axvline(event_pos, color='red')
         axes[2, 0].set_title('Association discrepancy')
         axes[2, 1].bar(self.feature_cols, feature_error[event_pos])
         axes[2, 1].tick_params(axis='x', rotation=90)
         axes[2, 1].set_title('Feature reconstruction error')
+        for ax in [axes[0, 0], axes[0, 1], axes[2, 0]]:
+            ax.set_xticks(tick_pos)
+            ax.set_xticklabels(tick_labels, rotation=30, ha='right')
         fig.tight_layout()
         output = os.path.join(self.output_dir, 'event_case_{}_{}.png'.format(
             self.visualize_ticker, self.event_date.replace('-', '_')))
