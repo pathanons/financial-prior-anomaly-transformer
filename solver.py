@@ -122,6 +122,7 @@ class Solver(object):
         'top_k': None,
         'visualize_ticker': None,
         'event_date': None,
+        'auto_case_ticker': None,
         'output_dir': 'figures',
         'run_root': None,
         'experiment_name': None,
@@ -495,23 +496,18 @@ class Solver(object):
         print("======================TEST MODE======================")
         return self.evaluate()
 
-    def visualize_event_case(self):
+    def _plot_event_case(self, event_date_text, case_name='manual'):
         import matplotlib.pyplot as plt
         import matplotlib.gridspec as gridspec
 
-        if not self.visualize_ticker or not self.event_date:
-            raise ValueError("--visualize_ticker and --event_date are required for visualize mode")
-        self.model.load_state_dict(torch.load(
-            os.path.join(str(self.model_save_path), str(self.dataset) + '_checkpoint.pth'),
-            map_location=self.device))
-        event_date = np.datetime64(self.event_date)
+        event_date = np.datetime64(event_date_text)
         dataset = self.test_loader.dataset
         candidates = [
             (i, meta) for i, meta in enumerate(dataset.metadata)
             if meta['ticker'] == self.visualize_ticker and np.datetime64(meta['dates'][0]) <= event_date <= np.datetime64(meta['dates'][-1])
         ]
         if not candidates:
-            raise ValueError("No window found for {} {}".format(self.visualize_ticker, self.event_date))
+            raise ValueError("No window found for {} {}".format(self.visualize_ticker, event_date_text))
         index, meta = min(candidates, key=lambda item: abs((np.datetime64(item[1]['end_date']) - event_date).astype(int)))
         x_np, _ = dataset[index]
         x = torch.from_numpy(x_np).unsqueeze(0).float().to(self.device)
@@ -537,12 +533,12 @@ class Solver(object):
         discrepancy = (kl_point(out['prior'][layer], out['series'][layer]) +
                        kl_point(out['series'][layer], out['prior'][layer])).mean(dim=1).squeeze(0).cpu().numpy()
         feature_error = out['feature_error'].squeeze(0).cpu().numpy()
-        event_pos = meta['dates'].index(self.event_date) if self.event_date in meta['dates'] else len(meta['dates']) - 1
+        event_pos = meta['dates'].index(event_date_text) if event_date_text in meta['dates'] else len(meta['dates']) - 1
 
         os.makedirs(self.output_dir, exist_ok=True)
         np.savez_compressed(
             os.path.join(self.output_dir, 'attention_values_{}_{}.npz'.format(
-                self.visualize_ticker, self.event_date.replace('-', '_'))),
+                self.visualize_ticker, '{}_{}'.format(case_name, event_date_text.replace('-', '_')))),
             series=s_plot,
             prior=p_plot,
             discrepancy=discrepancy,
@@ -562,7 +558,7 @@ class Solver(object):
         cmap = plt.get_cmap('viridis').copy()
         cmap.set_bad('white')
         fig = plt.figure(figsize=(16, 17))
-        fig.suptitle('{} attention diagnostic | {}'.format(self.visualize_ticker, self.event_date), fontsize=14)
+        fig.suptitle('{} attention diagnostic | {} | {}'.format(self.visualize_ticker, case_name, event_date_text), fontsize=14)
         grid = gridspec.GridSpec(6, 3, figure=fig, height_ratios=[1.0, 1.0, 1.0, 1.55, 1.15, 0.9])
 
         ax_close = fig.add_subplot(grid[0, :])
@@ -638,7 +634,7 @@ class Solver(object):
         top_lag = int(abs(event_pos - top_key))
         text = [
             'Ticker: {}'.format(self.visualize_ticker),
-            'Event date: {}'.format(self.event_date),
+            'Event date: {}'.format(event_date_text),
             'Window dates: {} to {}'.format(dates[0], dates[-1]),
             'Layer/head: {}/{}'.format(layer, self.plot_head),
             'Prior type: {}'.format(self.prior_type),
@@ -666,9 +662,64 @@ class Solver(object):
             ax.set_xticks(tick_pos)
             ax.set_xticklabels(tick_labels, rotation=30, ha='right')
         fig.tight_layout()
-        output = os.path.join(self.output_dir, 'event_case_{}_{}.png'.format(
-            self.visualize_ticker, self.event_date.replace('-', '_')))
+        output = os.path.join(self.output_dir, 'event_case_{}_{}_{}.png'.format(
+            self.visualize_ticker, case_name, event_date_text.replace('-', '_')))
         fig.savefig(output, dpi=150)
         plt.close(fig)
         print("Saved {}".format(output))
         return output
+
+    def _auto_case_dates(self, ticker):
+        frame = self.test_loader.dataset.frame
+        ticker_frame = frame[frame[self.test_loader.dataset.ticker_col].astype(str) == str(ticker)].copy()
+        if ticker_frame.empty:
+            raise ValueError("No test rows found for ticker {}".format(ticker))
+        ticker_frame = ticker_frame.sort_values(self.test_loader.dataset.date_col).reset_index(drop=True)
+        date_col = self.test_loader.dataset.date_col
+        label_col = self.test_loader.dataset.label_col
+        dates = ticker_frame[date_col].dt.strftime('%Y-%m-%d').tolist()
+
+        max_return_idx = int(ticker_frame['log_return_1d'].astype(float).idxmax())
+        normal_frame = ticker_frame[ticker_frame[label_col] == 0]
+        if normal_frame.empty:
+            normal_frame = ticker_frame
+        normal_idx = int(normal_frame['log_return_1d'].abs().astype(float).idxmin())
+
+        scores, _ = self.aggregate_window_scores(self.test_loader)
+        ticker_scores = {date: score for (score_ticker, date), score in scores.items() if score_ticker == ticker}
+        if not ticker_scores:
+            raise ValueError("No scores found for ticker {}".format(ticker))
+        max_score_date = max(ticker_scores, key=ticker_scores.get)
+        date_to_idx = {date: i for i, date in enumerate(dates)}
+        max_score_idx = date_to_idx[max_score_date]
+
+        cases = [
+            ('max_log_return', max_return_idx),
+            ('normal_low_abs_log_return', normal_idx),
+            ('max_score', max_score_idx)
+        ]
+        selected = []
+        for name, idx in cases:
+            for day_idx in range(max(0, idx - 5), idx + 1):
+                selected.append((name, dates[day_idx]))
+        return selected
+
+    def visualize_event_case(self):
+        if self.auto_case_ticker:
+            self.visualize_ticker = self.auto_case_ticker
+        if not self.visualize_ticker:
+            raise ValueError("--visualize_ticker or --auto_case_ticker is required for visualize mode")
+
+        self.model.load_state_dict(torch.load(
+            os.path.join(str(self.model_save_path), str(self.dataset) + '_checkpoint.pth'),
+            map_location=self.device))
+
+        if self.auto_case_ticker:
+            outputs = []
+            for case_name, event_date in self._auto_case_dates(self.auto_case_ticker):
+                outputs.append(self._plot_event_case(event_date, case_name))
+            return outputs
+
+        if not self.event_date:
+            raise ValueError("--event_date is required unless --auto_case_ticker is used")
+        return self._plot_event_case(self.event_date)
