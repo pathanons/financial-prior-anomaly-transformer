@@ -169,7 +169,8 @@ class Solver(object):
         keys = [
             'features', 'label_type', 'date_col', 'ticker_col', 'open_col', 'high_col',
             'low_col', 'close_col', 'volume_col', 'train_start', 'train_end', 'val_start',
-            'val_end', 'test_start', 'test_end', 'volume_window', 'label_window', 'tickers'
+            'val_end', 'test_start', 'test_end', 'volume_window', 'label_window', 'tickers',
+            'feature_cache_dir'
         ]
         return {key: getattr(self, key) for key in keys if hasattr(self, key)}
 

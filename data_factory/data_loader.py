@@ -11,6 +11,7 @@ import math
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import pickle
+import re
 
 
 DEFAULT_STOCK_FEATURES = [
@@ -56,6 +57,10 @@ def read_stock_ohlcv(data_path, date_col='date', ticker_col='ticker'):
         if expected not in frame.columns and expected.lower() in lower:
             rename[lower[expected.lower()]] = expected
     return frame.rename(columns=rename)
+
+
+def _safe_ticker_name(ticker):
+    return re.sub(r'[^A-Za-z0-9_.-]+', '_', str(ticker))
 
 
 def build_stock_features(frame, date_col='date', ticker_col='ticker', open_col='open',
@@ -115,23 +120,52 @@ def build_stock_features(frame, date_col='date', ticker_col='ticker', open_col='
     return result.dropna().reset_index(drop=True)
 
 
+def _feature_cache_dir(data_path, volume_window, label_window, feature_cache_dir):
+    if feature_cache_dir:
+        return feature_cache_dir
+    base = data_path.rstrip('/\\') if os.path.isdir(data_path) else os.path.splitext(data_path)[0]
+    return '{}_features_vw{}_lw{}'.format(base, volume_window, label_window)
+
+
 def cached_stock_features(data_path, date_col, ticker_col, open_col, high_col, low_col,
-                          close_col, volume_col, volume_window, label_window, tickers):
+                          close_col, volume_col, volume_window, label_window, tickers,
+                          feature_cache_dir=None):
     ticker_filter = tuple(_split_csv(tickers, []))
+    cache_dir = _feature_cache_dir(data_path, volume_window, label_window, feature_cache_dir)
     key = (
         os.path.abspath(data_path), date_col, ticker_col, open_col, high_col, low_col,
-        close_col, volume_col, volume_window, label_window, ticker_filter
+        close_col, volume_col, volume_window, label_window, ticker_filter,
+        os.path.abspath(cache_dir)
     )
     if key not in _STOCK_FEATURE_CACHE:
-        print("Building stock features from {}...".format(data_path), flush=True)
-        raw = read_stock_ohlcv(data_path, date_col, ticker_col)
+        frames = []
+        if os.path.isdir(cache_dir):
+            for name in sorted(os.listdir(cache_dir)):
+                if name.lower().endswith('_features.csv'):
+                    frame = pd.read_csv(os.path.join(cache_dir, name), parse_dates=[date_col])
+                    frames.append(frame)
+        if not frames:
+            print("Building stock features from {}...".format(data_path), flush=True)
+            raw = read_stock_ohlcv(data_path, date_col, ticker_col)
+            if ticker_filter:
+                raw = raw[raw[ticker_col].astype(str).isin(ticker_filter)]
+                if raw.empty:
+                    raise ValueError("No rows matched --tickers {}".format(','.join(ticker_filter)))
+            os.makedirs(cache_dir, exist_ok=True)
+            for ticker, g in raw.groupby(ticker_col, sort=False):
+                frame = build_stock_features(
+                    g, date_col, ticker_col, open_col, high_col, low_col, close_col,
+                    volume_col, volume_window, label_window)
+                frame.to_csv(os.path.join(cache_dir, '{}_features.csv'.format(_safe_ticker_name(ticker))),
+                             index=False)
+                frames.append(frame)
+            print("Wrote stock feature files to {}".format(cache_dir), flush=True)
+        result = pd.concat(frames, axis=0, ignore_index=True)
         if ticker_filter:
-            raw = raw[raw[ticker_col].astype(str).isin(ticker_filter)]
-            if raw.empty:
-                raise ValueError("No rows matched --tickers {}".format(','.join(ticker_filter)))
-        _STOCK_FEATURE_CACHE[key] = build_stock_features(
-            raw, date_col, ticker_col, open_col, high_col, low_col, close_col,
-            volume_col, volume_window, label_window)
+            result = result[result[ticker_col].astype(str).isin(ticker_filter)]
+            if result.empty:
+                raise ValueError("No cached feature rows matched --tickers {}".format(','.join(ticker_filter)))
+        _STOCK_FEATURE_CACHE[key] = result.sort_values([ticker_col, date_col]).reset_index(drop=True)
         print("Built stock feature rows: {}".format(len(_STOCK_FEATURE_CACHE[key])), flush=True)
     else:
         print("Reusing cached stock features from {}".format(data_path), flush=True)
@@ -144,7 +178,8 @@ class StockSegLoader(object):
                  open_col='open', high_col='high', low_col='low', close_col='close',
                  volume_col='volume', train_start=None, train_end=None,
                  val_start=None, val_end=None, test_start=None, test_end=None,
-                 volume_window=60, label_window=60, tickers=None):
+                 volume_window=60, label_window=60, tickers=None,
+                 feature_cache_dir=None):
         self.mode = mode
         self.step = step
         self.win_size = win_size
@@ -156,7 +191,7 @@ class StockSegLoader(object):
 
         features_frame = cached_stock_features(
             data_path, date_col, ticker_col, open_col, high_col, low_col, close_col,
-            volume_col, volume_window, label_window, tickers)
+            volume_col, volume_window, label_window, tickers, feature_cache_dir)
         missing = [c for c in self.feature_cols + [self.label_col] if c not in features_frame.columns]
         if missing:
             raise ValueError("Missing stock columns: {}".format(','.join(missing)))
@@ -439,7 +474,7 @@ def get_loader_segment(data_path, batch_size, win_size=100, step=100, mode='trai
         dataset = StockSegLoader(data_path, win_size, step, mode, **kwargs)
 
     shuffle = False
-    if mode == 'train' and getattr(dataset, 'metadata', None) is None:
+    if mode == 'train':
         shuffle = True
 
     data_loader = DataLoader(dataset=dataset,

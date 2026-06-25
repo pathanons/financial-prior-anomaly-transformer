@@ -57,6 +57,7 @@ if __name__ == '__main__':
     parser.add_argument('--z_state_features', type=str, default='log_return_1d,abs_return,volume_z,rolling_vol_5,rolling_vol_20,vol_ratio_5_20')
     parser.add_argument('--volume_window', type=int, default=60)
     parser.add_argument('--label_window', type=int, default=60)
+    parser.add_argument('--feature_cache_dir', type=str, default=None)
     parser.add_argument('--train_start', type=str, default=None)
     parser.add_argument('--train_end', type=str, default=None)
     parser.add_argument('--val_start', type=str, default=None)
