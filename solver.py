@@ -430,6 +430,43 @@ class Solver(object):
             'event_hit_rate': float(event_recall)
         }
 
+    def _save_curves(self, scores, labels):
+        if not self.run_dir:
+            return
+        from sklearn.metrics import precision_recall_curve, roc_curve
+        import matplotlib.pyplot as plt
+
+        keys = list(scores.keys())
+        y_score = np.array([scores[key] for key in keys], dtype=float)
+        y_true = np.array([labels[key] for key in keys], dtype=int)
+        if len(np.unique(y_true)) < 2:
+            return
+        figure_dir = os.path.join(self.run_dir, 'figures')
+        os.makedirs(figure_dir, exist_ok=True)
+
+        precision, recall, _ = precision_recall_curve(y_true, y_score)
+        fig, ax = plt.subplots(figsize=(6, 4.5))
+        ax.plot(recall, precision)
+        ax.set_title('Precision-Recall Curve')
+        ax.set_xlabel('Recall')
+        ax.set_ylabel('Precision')
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(figure_dir, 'precision_recall_curve.png'), dpi=150)
+        plt.close(fig)
+
+        fpr, tpr, _ = roc_curve(y_true, y_score)
+        fig, ax = plt.subplots(figsize=(6, 4.5))
+        ax.plot(fpr, tpr)
+        ax.plot([0, 1], [0, 1], linestyle='--', color='0.6')
+        ax.set_title('ROC Curve')
+        ax.set_xlabel('FPR')
+        ax.set_ylabel('TPR')
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(figure_dir, 'roc_curve.png'), dpi=150)
+        plt.close(fig)
+
     def evaluate(self):
         val_scores, val_labels = self.aggregate_window_scores(self.vali_loader)
         test_scores, test_labels = self.aggregate_window_scores(self.test_loader)
@@ -438,6 +475,7 @@ class Solver(object):
         threshold = self._threshold(val_scores, val_labels)
         metrics, y_pred = self._point_metrics(test_scores, test_labels, threshold)
         metrics.update(self._event_metrics(test_scores, test_labels, y_pred))
+        self._save_curves(test_scores, test_labels)
         for key, value in metrics.items():
             print("{}: {}".format(key, value))
         if self.run_dir:
@@ -459,6 +497,7 @@ class Solver(object):
 
     def visualize_event_case(self):
         import matplotlib.pyplot as plt
+        import matplotlib.gridspec as gridspec
 
         if not self.visualize_ticker or not self.event_date:
             raise ValueError("--visualize_ticker and --event_date are required for visualize mode")
@@ -490,6 +529,11 @@ class Solver(object):
             head = int(self.plot_head)
             s_plot = series[head]
             p_plot = prior[head]
+        s_plot = s_plot.copy()
+        p_plot = p_plot.copy()
+        np.fill_diagonal(s_plot, np.nan)
+        np.fill_diagonal(p_plot, np.nan)
+        diff_plot = np.abs(s_plot - p_plot)
         discrepancy = (kl_point(out['prior'][layer], out['series'][layer]) +
                        kl_point(out['series'][layer], out['prior'][layer])).mean(dim=1).squeeze(0).cpu().numpy()
         feature_error = out['feature_error'].squeeze(0).cpu().numpy()
@@ -507,7 +551,6 @@ class Solver(object):
             dates=np.array(meta['dates']),
             feature_names=np.array(self.feature_cols)
         )
-        fig, axes = plt.subplots(3, 2, figsize=(16, 12))
         dates = meta['dates']
         x_axis = np.arange(len(dates))
         tick_step = max(1, len(dates) // 6)
@@ -516,31 +559,116 @@ class Solver(object):
             tick_pos.append(len(dates) - 1)
         tick_labels = [dates[i] for i in tick_pos]
 
-        axes[0, 0].plot(x_axis, meta['close'], label='close')
-        axes[0, 0].plot(x_axis, score / (np.nanmax(score) + 1e-8) * np.nanmax(meta['close']), label='score')
-        axes[0, 0].axvline(event_pos, color='red')
-        axes[0, 0].legend()
-        for name in ['log_return_1d', 'volume_z', 'rolling_vol_20', 'vol_ratio_5_20']:
-            if name in self.feature_cols:
-                axes[0, 1].plot(x_axis, x_np[:, self.feature_cols.index(name)], label=name)
-        axes[0, 1].axvline(event_pos, color='red')
-        axes[0, 1].legend()
-        axes[1, 0].imshow(s_plot, aspect='auto')
-        axes[1, 0].set_title('Series association')
-        axes[1, 1].imshow(p_plot, aspect='auto')
-        axes[1, 1].set_title('Prior association')
-        axes[2, 0].plot(x_axis, discrepancy)
-        axes[2, 0].axvline(event_pos, color='red')
-        axes[2, 0].set_title('Association discrepancy')
-        axes[2, 1].bar(self.feature_cols, feature_error[event_pos])
-        axes[2, 1].tick_params(axis='x', rotation=90)
-        axes[2, 1].set_title('Feature reconstruction error')
-        for ax in [axes[0, 0], axes[0, 1], axes[2, 0]]:
+        cmap = plt.get_cmap('viridis').copy()
+        cmap.set_bad('white')
+        fig = plt.figure(figsize=(16, 17))
+        fig.suptitle('{} attention diagnostic | {}'.format(self.visualize_ticker, self.event_date), fontsize=14)
+        grid = gridspec.GridSpec(6, 3, figure=fig, height_ratios=[1.0, 1.0, 1.0, 1.55, 1.15, 0.9])
+
+        ax_close = fig.add_subplot(grid[0, :])
+        ax_close.plot(x_axis, meta['close'], color='0.2', linewidth=1.2, label='close')
+        ax_close.axvline(event_pos, color='red', alpha=0.8)
+        ax_close.scatter([event_pos], [meta['close'][event_pos]], facecolors='none', edgecolors='red', s=70, linewidth=1.5)
+        ax_close.set_title('Close with selected attention point')
+        ax_close.set_ylabel('Close')
+        ax_close.grid(True, alpha=0.25)
+        ax_close.legend(loc='upper left')
+
+        ax_return = fig.add_subplot(grid[1, :], sharex=ax_close)
+        if 'log_return_1d' in self.feature_cols:
+            returns = x_np[:, self.feature_cols.index('log_return_1d')]
+            std = np.nanstd(returns)
+            ax_return.plot(x_axis, returns, color='#1f77b4', linewidth=1.0, label='log_return_1d')
+            ax_return.axhline(3 * std, linestyle='--', color='purple', alpha=0.55, label='+3 std')
+            ax_return.axhline(-3 * std, linestyle='--', color='purple', alpha=0.55, label='-3 std')
+        ax_return.axvline(event_pos, color='red', alpha=0.8)
+        ax_return.scatter([event_pos], [returns[event_pos] if 'log_return_1d' in self.feature_cols else 0],
+                          facecolors='none', edgecolors='red', s=70, linewidth=1.5)
+        ax_return.set_title('Log return')
+        ax_return.set_ylabel('log_return')
+        ax_return.grid(True, alpha=0.25)
+        ax_return.legend(loc='upper left')
+
+        ax_score = fig.add_subplot(grid[2, :], sharex=ax_close)
+        ax_score.plot(x_axis, score, color='#8c564b', linewidth=1.1, label='anomaly score')
+        ax_score.axvline(event_pos, color='red', alpha=0.8)
+        ax_score.scatter([event_pos], [score[event_pos]], facecolors='none', edgecolors='red', s=70, linewidth=1.5,
+                         label='selected window')
+        ax_score.set_title('Anomaly score')
+        ax_score.set_ylabel('score')
+        ax_score.grid(True, alpha=0.25)
+        ax_score.legend(loc='upper left')
+
+        heatmaps = [
+            (fig.add_subplot(grid[3, 0]), s_plot, 'Learned series attention (diag masked)'),
+            (fig.add_subplot(grid[3, 1]), p_plot, '{} prior attention (diag masked)'.format(self.prior_type)),
+            (fig.add_subplot(grid[3, 2]), diff_plot, '|series - prior| (diag masked)')
+        ]
+        for ax, values, title in heatmaps:
+            image = ax.imshow(values, aspect='auto', vmin=0.0, vmax=np.nanmax(values) if np.nanmax(values) > 0 else 1.0,
+                              cmap=cmap)
+            ax.set_title(title)
+            ax.set_xlabel('Key date')
+            ax.set_ylabel('Query date')
+            ax.set_xticks(tick_pos)
+            ax.set_xticklabels(tick_labels, rotation=35, ha='right', fontsize=8)
+            ax.set_yticks(tick_pos)
+            ax.set_yticklabels(tick_labels, fontsize=8)
+            fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
+
+        ax_row = fig.add_subplot(grid[4, 0])
+        ax_row.plot(x_axis, np.nan_to_num(s_plot[event_pos]), label='series selected row')
+        ax_row.plot(x_axis, np.nan_to_num(p_plot[event_pos]), label='prior selected row')
+        ax_row.set_title('Selected query attention row')
+        ax_row.set_xlabel('Key position')
+        ax_row.set_ylabel('Weight')
+        ax_row.grid(True, alpha=0.25)
+        ax_row.legend(loc='upper right')
+
+        ax_diff = fig.add_subplot(grid[4, 1])
+        ax_diff.bar(x_axis, np.nan_to_num(diff_plot[event_pos]), color='#8c564b')
+        ax_diff.set_title('Selected query absolute difference')
+        ax_diff.set_xlabel('Key position')
+        ax_diff.set_ylabel('Abs diff')
+        ax_diff.grid(True, alpha=0.25)
+
+        ax_text = fig.add_subplot(grid[4:, 2])
+        ax_text.axis('off')
+        top_key = int(np.nanargmax(np.nan_to_num(s_plot[event_pos])))
+        top_lag = int(abs(event_pos - top_key))
+        text = [
+            'Ticker: {}'.format(self.visualize_ticker),
+            'Event date: {}'.format(self.event_date),
+            'Window dates: {} to {}'.format(dates[0], dates[-1]),
+            'Layer/head: {}/{}'.format(layer, self.plot_head),
+            'Prior type: {}'.format(self.prior_type),
+            'Score at event: {:.6g}'.format(float(score[event_pos])),
+            'Association discrepancy: {:.4f}'.format(float(discrepancy[event_pos])),
+            'Top attention key date: {}'.format(dates[top_key]),
+            'Top attention lag: {}'.format(top_lag),
+            '',
+            'Interpretation:',
+            'Series is the learned time-to-time attention.',
+            'Prior is the configured time/state association.',
+            'Large |series-prior| marks where learned attention',
+            'departs from the finance prior. Feature bars show',
+            'which reconstructed inputs contributed at the event.'
+        ]
+        ax_text.text(0.0, 1.0, '\n'.join(text), va='top', ha='left', family='monospace', fontsize=10)
+
+        ax_feat = fig.add_subplot(grid[5, 0:2])
+        ax_feat.bar(self.feature_cols, feature_error[event_pos])
+        ax_feat.tick_params(axis='x', rotation=70)
+        ax_feat.set_title('Feature reconstruction error at selected date')
+        ax_feat.grid(True, axis='y', alpha=0.25)
+
+        for ax in [ax_close, ax_return, ax_score]:
             ax.set_xticks(tick_pos)
             ax.set_xticklabels(tick_labels, rotation=30, ha='right')
         fig.tight_layout()
         output = os.path.join(self.output_dir, 'event_case_{}_{}.png'.format(
             self.visualize_ticker, self.event_date.replace('-', '_')))
         fig.savefig(output, dpi=150)
+        plt.close(fig)
         print("Saved {}".format(output))
         return output
