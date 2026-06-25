@@ -1,5 +1,7 @@
 import os
 import time
+import csv
+import json
 from collections import defaultdict
 
 import numpy as np
@@ -121,6 +123,8 @@ class Solver(object):
         'visualize_ticker': None,
         'event_date': None,
         'output_dir': 'figures',
+        'run_root': None,
+        'experiment_name': None,
         'plot_layer': 0,
         'plot_head': 'average'
     }
@@ -129,6 +133,17 @@ class Solver(object):
         self.__dict__.update(Solver.DEFAULTS, **config)
         self.dataset = self.dataset.upper()
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.run_dir = None
+        if self.run_root:
+            self.experiment_name = self.experiment_name or os.path.basename(str(self.model_save_path).rstrip('/\\'))
+            self.run_dir = os.path.join(self.run_root, self.experiment_name)
+            self.model_save_path = os.path.join(self.run_dir, 'checkpoints')
+            self.output_dir = os.path.join(self.run_dir, 'figures')
+            os.makedirs(os.path.join(self.run_dir, 'logs'), exist_ok=True)
+            os.makedirs(self.model_save_path, exist_ok=True)
+            os.makedirs(self.output_dir, exist_ok=True)
+            with open(os.path.join(self.run_dir, 'config.json'), 'w') as f:
+                json.dump(config, f, indent=2, sort_keys=True, default=str)
         self.feature_cols = _csv(self.features, DEFAULT_STOCK_FEATURES)
         if self.dataset == 'STOCK':
             self.input_c = len(self.feature_cols)
@@ -208,6 +223,7 @@ class Solver(object):
             os.makedirs(path)
         early_stopping = EarlyStopping(patience=3, verbose=True, dataset_name=self.dataset)
         train_steps = len(self.train_loader)
+        loss_rows = []
 
         for epoch in range(self.num_epochs):
             iter_count = 0
@@ -233,13 +249,30 @@ class Solver(object):
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             vali_loss1, vali_loss2 = self.vali(self.vali_loader)
+            row = {
+                'epoch': epoch + 1,
+                'train_loss': float(np.average(loss1_list)),
+                'vali_loss_series_phase': float(vali_loss1),
+                'vali_loss_prior_phase': float(vali_loss2)
+            }
+            loss_rows.append(row)
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} ".format(
-                epoch + 1, train_steps, np.average(loss1_list), vali_loss1))
+                epoch + 1, train_steps, row['train_loss'], vali_loss1))
+            self._save_train_losses(loss_rows)
             early_stopping(vali_loss1, vali_loss2, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
                 break
             adjust_learning_rate(self.optimizer, epoch + 1, self.lr)
+
+    def _save_train_losses(self, rows):
+        if not self.run_dir or not rows:
+            return
+        path = os.path.join(self.run_dir, 'train_losses.csv')
+        with open(path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
 
     def compute_anomaly_score(self, out):
         assdis = association_point(out['series'], out['prior'])
@@ -299,6 +332,16 @@ class Solver(object):
                 raise ValueError("Unknown score_aggregation: {}".format(self.score_aggregation))
             labels[key] = int(max(label_buckets[key]))
         return timeline, labels
+
+    def _save_timeline(self, name, scores, labels):
+        if not self.run_dir:
+            return
+        path = os.path.join(self.run_dir, '{}_timeline_scores.csv'.format(name))
+        with open(path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['ticker', 'date', 'score', 'label'])
+            for (ticker, date), score in sorted(scores.items()):
+                writer.writerow([ticker, date, score, labels[(ticker, date)]])
 
     def _threshold(self, val_scores, val_labels):
         scores = np.array(list(val_scores.values()), dtype=float)
@@ -390,11 +433,21 @@ class Solver(object):
     def evaluate(self):
         val_scores, val_labels = self.aggregate_window_scores(self.vali_loader)
         test_scores, test_labels = self.aggregate_window_scores(self.test_loader)
+        self._save_timeline('val', val_scores, val_labels)
+        self._save_timeline('test', test_scores, test_labels)
         threshold = self._threshold(val_scores, val_labels)
         metrics, y_pred = self._point_metrics(test_scores, test_labels, threshold)
         metrics.update(self._event_metrics(test_scores, test_labels, y_pred))
         for key, value in metrics.items():
             print("{}: {}".format(key, value))
+        if self.run_dir:
+            with open(os.path.join(self.run_dir, 'metrics.json'), 'w') as f:
+                json.dump(metrics, f, indent=2, sort_keys=True, allow_nan=True)
+            with open(os.path.join(self.run_dir, 'metrics.csv'), 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['metric', 'value'])
+                for key, value in metrics.items():
+                    writer.writerow([key, value])
         return metrics
 
     def test(self):
@@ -443,6 +496,17 @@ class Solver(object):
         event_pos = meta['dates'].index(self.event_date) if self.event_date in meta['dates'] else len(meta['dates']) - 1
 
         os.makedirs(self.output_dir, exist_ok=True)
+        np.savez_compressed(
+            os.path.join(self.output_dir, 'attention_values_{}_{}.npz'.format(
+                self.visualize_ticker, self.event_date.replace('-', '_'))),
+            series=s_plot,
+            prior=p_plot,
+            discrepancy=discrepancy,
+            score=score,
+            feature_error=feature_error,
+            dates=np.array(meta['dates']),
+            feature_names=np.array(self.feature_cols)
+        )
         fig, axes = plt.subplots(3, 2, figsize=(16, 12))
         dates = meta['dates']
         axes[0, 0].plot(dates, meta['close'], label='close')

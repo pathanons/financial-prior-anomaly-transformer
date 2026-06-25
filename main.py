@@ -82,6 +82,8 @@ if __name__ == '__main__':
     parser.add_argument('--visualize_ticker', type=str, default=None)
     parser.add_argument('--event_date', type=str, default=None)
     parser.add_argument('--output_dir', type=str, default='figures')
+    parser.add_argument('--run_root', type=str, default=None)
+    parser.add_argument('--experiment_name', type=str, default=None)
     parser.add_argument('--plot_layer', type=int, default=0)
     parser.add_argument('--plot_head', type=str, default='average')
 
