@@ -6,10 +6,9 @@ call "%USERPROFILE%\miniconda3\Scripts\activate.bat" base
 if errorlevel 1 exit /b 1
 
 set RUN_ROOT=D:\multi-prior-at-run
-set TICKERS=AAPL,MSFT,NVDA,AMD,TSLA,JPM,XOM,WMT,GOOGL,AMZN
 set EVENT_TICKER=AAPL
 set EVENT_DATE=2023-05-15
-set COMMON=main.py --dataset STOCK --data_path SP500 --tickers %TICKERS% --win_size 60 --batch_size 32 --num_epochs 3 --train_start 2018-01-01 --train_end 2021-12-31 --val_start 2022-01-01 --val_end 2022-12-31 --test_start 2023-01-01 --test_end 2023-12-31 --k 3 --run_root %RUN_ROOT%
+set COMMON=main.py --dataset STOCK --data_path SP500 --win_size 60 --batch_size 32 --num_epochs 5 --train_start 2018-01-01 --train_end 2021-12-31 --val_start 2022-01-01 --val_end 2022-12-31 --test_start 2023-01-01 --test_end 2023-12-31 --k 3 --run_root %RUN_ROOT%
 
 if not exist "%RUN_ROOT%" mkdir "%RUN_ROOT%"
 
