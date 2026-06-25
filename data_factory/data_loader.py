@@ -28,10 +28,32 @@ def _split_csv(value, default):
     return [part.strip() for part in value.split(',') if part.strip()]
 
 
-def _stock_path(data_path):
+def read_stock_ohlcv(data_path, date_col='date', ticker_col='ticker'):
     if os.path.isdir(data_path):
-        return os.path.join(data_path, 'stock_ohlcv.csv')
-    return data_path
+        combined = os.path.join(data_path, 'stock_ohlcv.csv')
+        if os.path.exists(combined):
+            frame = pd.read_csv(combined)
+        else:
+            frames = []
+            for name in sorted(os.listdir(data_path)):
+                if not name.lower().endswith('.csv'):
+                    continue
+                path = os.path.join(data_path, name)
+                part = pd.read_csv(path)
+                part[ticker_col] = name.split('_')[0]
+                frames.append(part)
+            if not frames:
+                raise ValueError("No stock CSV files found in {}".format(data_path))
+            frame = pd.concat(frames, axis=0, ignore_index=True)
+    else:
+        frame = pd.read_csv(data_path)
+
+    lower = {col.lower(): col for col in frame.columns}
+    rename = {}
+    for expected in [date_col, ticker_col, 'open', 'high', 'low', 'close', 'volume']:
+        if expected not in frame.columns and expected.lower() in lower:
+            rename[lower[expected.lower()]] = expected
+    return frame.rename(columns=rename)
 
 
 def build_stock_features(frame, date_col='date', ticker_col='ticker', open_col='open',
@@ -97,7 +119,7 @@ class StockSegLoader(object):
                  open_col='open', high_col='high', low_col='low', close_col='close',
                  volume_col='volume', train_start=None, train_end=None,
                  val_start=None, val_end=None, test_start=None, test_end=None,
-                 volume_window=60, label_window=60):
+                 volume_window=60, label_window=60, tickers=None):
         self.mode = mode
         self.step = step
         self.win_size = win_size
@@ -107,7 +129,12 @@ class StockSegLoader(object):
         self.feature_cols = _split_csv(features, DEFAULT_STOCK_FEATURES)
         self.label_col = label_type if label_type.endswith('_label') else label_type + '_label'
 
-        raw = pd.read_csv(_stock_path(data_path))
+        raw = read_stock_ohlcv(data_path, date_col, ticker_col)
+        ticker_filter = _split_csv(tickers, [])
+        if ticker_filter:
+            raw = raw[raw[ticker_col].astype(str).isin(ticker_filter)]
+            if raw.empty:
+                raise ValueError("No rows matched --tickers {}".format(','.join(ticker_filter)))
         features_frame = build_stock_features(
             raw, date_col, ticker_col, open_col, high_col, low_col, close_col,
             volume_col, volume_window, label_window)

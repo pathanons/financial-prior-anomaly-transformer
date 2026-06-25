@@ -52,6 +52,7 @@ if __name__ == '__main__':
     parser.add_argument('--low_col', type=str, default='low')
     parser.add_argument('--close_col', type=str, default='close')
     parser.add_argument('--volume_col', type=str, default='volume')
+    parser.add_argument('--tickers', type=str, default=None)
     parser.add_argument('--features', type=str, default='log_return_1d,return_5d,return_20d,volume_z,abs_return,squared_return,rolling_vol_5,rolling_vol_20,vol_ratio_5_20,gap,high_low_range')
     parser.add_argument('--z_state_features', type=str, default='log_return_1d,abs_return,volume_z,rolling_vol_5,rolling_vol_20,vol_ratio_5_20')
     parser.add_argument('--volume_window', type=int, default=60)
