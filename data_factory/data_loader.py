@@ -19,6 +19,8 @@ DEFAULT_STOCK_FEATURES = [
     'gap', 'high_low_range'
 ]
 
+_STOCK_FEATURE_CACHE = {}
+
 
 def _split_csv(value, default):
     if value is None or value == '':
@@ -113,6 +115,29 @@ def build_stock_features(frame, date_col='date', ticker_col='ticker', open_col='
     return result.dropna().reset_index(drop=True)
 
 
+def cached_stock_features(data_path, date_col, ticker_col, open_col, high_col, low_col,
+                          close_col, volume_col, volume_window, label_window, tickers):
+    ticker_filter = tuple(_split_csv(tickers, []))
+    key = (
+        os.path.abspath(data_path), date_col, ticker_col, open_col, high_col, low_col,
+        close_col, volume_col, volume_window, label_window, ticker_filter
+    )
+    if key not in _STOCK_FEATURE_CACHE:
+        print("Building stock features from {}...".format(data_path), flush=True)
+        raw = read_stock_ohlcv(data_path, date_col, ticker_col)
+        if ticker_filter:
+            raw = raw[raw[ticker_col].astype(str).isin(ticker_filter)]
+            if raw.empty:
+                raise ValueError("No rows matched --tickers {}".format(','.join(ticker_filter)))
+        _STOCK_FEATURE_CACHE[key] = build_stock_features(
+            raw, date_col, ticker_col, open_col, high_col, low_col, close_col,
+            volume_col, volume_window, label_window)
+        print("Built stock feature rows: {}".format(len(_STOCK_FEATURE_CACHE[key])), flush=True)
+    else:
+        print("Reusing cached stock features from {}".format(data_path), flush=True)
+    return _STOCK_FEATURE_CACHE[key]
+
+
 class StockSegLoader(object):
     def __init__(self, data_path, win_size, step, mode="train", features=None,
                  label_type='absolute', date_col='date', ticker_col='ticker',
@@ -129,15 +154,9 @@ class StockSegLoader(object):
         self.feature_cols = _split_csv(features, DEFAULT_STOCK_FEATURES)
         self.label_col = label_type if label_type.endswith('_label') else label_type + '_label'
 
-        raw = read_stock_ohlcv(data_path, date_col, ticker_col)
-        ticker_filter = _split_csv(tickers, [])
-        if ticker_filter:
-            raw = raw[raw[ticker_col].astype(str).isin(ticker_filter)]
-            if raw.empty:
-                raise ValueError("No rows matched --tickers {}".format(','.join(ticker_filter)))
-        features_frame = build_stock_features(
-            raw, date_col, ticker_col, open_col, high_col, low_col, close_col,
-            volume_col, volume_window, label_window)
+        features_frame = cached_stock_features(
+            data_path, date_col, ticker_col, open_col, high_col, low_col, close_col,
+            volume_col, volume_window, label_window, tickers)
         missing = [c for c in self.feature_cols + [self.label_col] if c not in features_frame.columns]
         if missing:
             raise ValueError("Missing stock columns: {}".format(','.join(missing)))

@@ -30,15 +30,15 @@ set EXP_DIR=%RUN_ROOT%\%EXP%
 if not exist "%EXP_DIR%\logs" mkdir "%EXP_DIR%\logs"
 
 echo === %EXP% train ===
-python %COMMON% --experiment_name %EXP% --mode train --model_save_path "%EXP_DIR%\checkpoints" %ARGS% > "%EXP_DIR%\logs\train.log" 2>&1
+python -u %COMMON% --experiment_name %EXP% --mode train --model_save_path "%EXP_DIR%\checkpoints" %ARGS% > "%EXP_DIR%\logs\train.log" 2>&1
 if errorlevel 1 exit /b 1
 
 echo === %EXP% test ===
-python %COMMON% --experiment_name %EXP% --mode test --model_save_path "%EXP_DIR%\checkpoints" %ARGS% > "%EXP_DIR%\logs\test.log" 2>&1
+python -u %COMMON% --experiment_name %EXP% --mode test --model_save_path "%EXP_DIR%\checkpoints" %ARGS% > "%EXP_DIR%\logs\test.log" 2>&1
 if errorlevel 1 exit /b 1
 
 echo === %EXP% visualize ===
-python %COMMON% --experiment_name %EXP% --mode visualize --model_save_path "%EXP_DIR%\checkpoints" %ARGS% --auto_case_ticker %EVENT_TICKER% > "%EXP_DIR%\logs\visualize.log" 2>&1
+python -u %COMMON% --experiment_name %EXP% --mode visualize --model_save_path "%EXP_DIR%\checkpoints" %ARGS% --auto_case_ticker %EVENT_TICKER% > "%EXP_DIR%\logs\visualize.log" 2>&1
 if errorlevel 1 exit /b 1
 
 exit /b 0
