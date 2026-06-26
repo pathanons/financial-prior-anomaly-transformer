@@ -152,13 +152,17 @@ def cached_stock_features(data_path, date_col, ticker_col, open_col, high_col, l
                 if raw.empty:
                     raise ValueError("No rows matched --tickers {}".format(','.join(ticker_filter)))
             os.makedirs(cache_dir, exist_ok=True)
-            for ticker, g in raw.groupby(ticker_col, sort=False):
+            groups = list(raw.groupby(ticker_col, sort=False))
+            total = len(groups)
+            for i, (ticker, g) in enumerate(groups, 1):
                 frame = build_stock_features(
                     g, date_col, ticker_col, open_col, high_col, low_col, close_col,
                     volume_col, volume_window, label_window)
                 frame.to_csv(os.path.join(cache_dir, '{}_features.csv'.format(_safe_ticker_name(ticker))),
                              index=False)
                 frames.append(frame)
+                if i == 1 or i == total or i % 10 == 0:
+                    print("Feature cache: {}/{} tickers".format(i, total), flush=True)
             print("Wrote stock feature files to {}".format(cache_dir), flush=True)
         result = pd.concat(frames, axis=0, ignore_index=True)
         if ticker_filter:

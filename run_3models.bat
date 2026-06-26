@@ -7,7 +7,7 @@ if errorlevel 1 exit /b 1
 
 set RUN_ROOT=D:\multi-prior-at-run
 set EVENT_TICKER=AKAM
-set COMMON=main.py --dataset STOCK --data_path SP500 --win_size 60 --batch_size 32 --num_epochs 5 --train_start 2018-01-01 --train_end 2021-12-31 --val_start 2022-01-01 --val_end 2022-12-31 --test_start 2023-01-01 --test_end 2023-12-31 --k 3 --run_root %RUN_ROOT%
+set COMMON=main.py --dataset STOCK --data_path SP500 --win_size 60 --batch_size 32 --num_epochs 5 --train_start 2018-01-01 --train_end 2021-12-31 --val_start 2022-01-01 --val_end 2022-12-31 --test_start 2023-01-01 --test_end 2024-12-31 --k 3 --run_root %RUN_ROOT%
 
 if not exist "%RUN_ROOT%" mkdir "%RUN_ROOT%"
 
@@ -30,15 +30,15 @@ set EXP_DIR=%RUN_ROOT%\%EXP%
 if not exist "%EXP_DIR%\logs" mkdir "%EXP_DIR%\logs"
 
 echo === %EXP% train ===
-python -u %COMMON% --experiment_name %EXP% --mode train --model_save_path "%EXP_DIR%\checkpoints" %ARGS% > "%EXP_DIR%\logs\train.log" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& { python -u %COMMON% --experiment_name %EXP% --mode train --model_save_path '%EXP_DIR%\checkpoints' %ARGS% 2>&1 | Tee-Object -FilePath '%EXP_DIR%\logs\train.log'; exit $LASTEXITCODE }"
 if errorlevel 1 exit /b 1
 
 echo === %EXP% test ===
-python -u %COMMON% --experiment_name %EXP% --mode test --model_save_path "%EXP_DIR%\checkpoints" %ARGS% > "%EXP_DIR%\logs\test.log" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& { python -u %COMMON% --experiment_name %EXP% --mode test --model_save_path '%EXP_DIR%\checkpoints' %ARGS% 2>&1 | Tee-Object -FilePath '%EXP_DIR%\logs\test.log'; exit $LASTEXITCODE }"
 if errorlevel 1 exit /b 1
 
 echo === %EXP% visualize ===
-python -u %COMMON% --experiment_name %EXP% --mode visualize --model_save_path "%EXP_DIR%\checkpoints" %ARGS% --auto_case_ticker %EVENT_TICKER% > "%EXP_DIR%\logs\visualize.log" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& { python -u %COMMON% --experiment_name %EXP% --mode visualize --model_save_path '%EXP_DIR%\checkpoints' %ARGS% --auto_case_ticker %EVENT_TICKER% 2>&1 | Tee-Object -FilePath '%EXP_DIR%\logs\visualize.log'; exit $LASTEXITCODE }"
 if errorlevel 1 exit /b 1
 
 exit /b 0

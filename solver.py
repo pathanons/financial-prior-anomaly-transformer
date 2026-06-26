@@ -5,6 +5,7 @@ import json
 from collections import defaultdict
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -151,6 +152,7 @@ class Solver(object):
             self.output_c = len(self.feature_cols)
         self.return_idx = self.feature_cols.index('log_return_1d') if 'log_return_1d' in self.feature_cols else 0
         self.feature_weight_values = None
+        self.plot_threshold = None
         if self.feature_weights:
             self.feature_weight_values = [float(x) for x in str(self.feature_weights).split(',') if x.strip()]
             if len(self.feature_weight_values) != len(self.feature_cols):
@@ -493,12 +495,47 @@ class Solver(object):
     def test(self):
         self.model.load_state_dict(torch.load(
             os.path.join(str(self.model_save_path), str(self.dataset) + '_checkpoint.pth'),
-            map_location=self.device))
+            map_location=self.device,
+            weights_only=True))
         print("======================TEST MODE======================")
         return self.evaluate()
 
+    def _ticker_timeline(self, ticker):
+        frame = self.test_loader.dataset.frame
+        ticker_frame = frame[frame[self.test_loader.dataset.ticker_col].astype(str) == str(ticker)].copy()
+        if ticker_frame.empty:
+            raise ValueError("No test rows found for ticker {}".format(ticker))
+        ticker_frame = ticker_frame.sort_values(self.test_loader.dataset.date_col).reset_index(drop=True)
+        scores = None
+        score_path = os.path.join(self.run_dir or '', 'test_timeline_scores.csv')
+        if os.path.exists(score_path):
+            score_frame = pd.read_csv(score_path)
+            score_frame = score_frame[score_frame['ticker'].astype(str) == str(ticker)]
+            scores = dict(zip(score_frame['date'].astype(str), score_frame['score'].astype(float)))
+            wanted_dates = set(ticker_frame[self.test_loader.dataset.date_col].dt.strftime('%Y-%m-%d'))
+            if set(scores) != wanted_dates:
+                scores = None
+        if scores is None:
+            all_scores, _ = self.aggregate_window_scores(self.test_loader)
+            scores = {date: score for (score_ticker, date), score in all_scores.items()
+                      if str(score_ticker) == str(ticker)}
+        dates = ticker_frame[self.test_loader.dataset.date_col].dt.strftime('%Y-%m-%d').tolist()
+        ticker_frame['timeline_score'] = [scores.get(date, np.nan) for date in dates]
+        return ticker_frame
+
+    def _score_threshold_for_plot(self):
+        if self.plot_threshold is not None:
+            return self.plot_threshold
+        val_scores, val_labels = self.aggregate_window_scores(self.vali_loader)
+        old_percentile = self.threshold_percentile
+        self.threshold_percentile = 95.0
+        self.plot_threshold = self._threshold(val_scores, val_labels)
+        self.threshold_percentile = old_percentile
+        return self.plot_threshold
+
     def _plot_event_case(self, event_date_text, case_name='manual'):
         import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
         import matplotlib.gridspec as gridspec
 
         event_date = np.datetime64(event_date_text)
@@ -535,6 +572,13 @@ class Solver(object):
                        kl_point(out['series'][layer], out['prior'][layer])).mean(dim=1).squeeze(0).cpu().numpy()
         feature_error = out['feature_error'].squeeze(0).cpu().numpy()
         event_pos = meta['dates'].index(event_date_text) if event_date_text in meta['dates'] else len(meta['dates']) - 1
+        dates = meta['dates']
+        timeline = self._ticker_timeline(self.visualize_ticker)
+        timeline_dates = pd.to_datetime(timeline[self.test_loader.dataset.date_col])
+        event_ts = pd.to_datetime(event_date_text)
+        window_start = pd.to_datetime(dates[0])
+        window_end = pd.to_datetime(dates[-1])
+        threshold = self._score_threshold_for_plot()
 
         os.makedirs(self.output_dir, exist_ok=True)
         np.savez_compressed(
@@ -548,7 +592,6 @@ class Solver(object):
             dates=np.array(meta['dates']),
             feature_names=np.array(self.feature_cols)
         )
-        dates = meta['dates']
         x_axis = np.arange(len(dates))
         tick_step = max(1, len(dates) // 6)
         tick_pos = list(range(0, len(dates), tick_step))
@@ -563,38 +606,51 @@ class Solver(object):
         grid = gridspec.GridSpec(6, 3, figure=fig, height_ratios=[1.0, 1.0, 1.0, 1.55, 1.15, 0.9])
 
         ax_close = fig.add_subplot(grid[0, :])
-        ax_close.plot(x_axis, meta['close'], color='0.2', linewidth=1.2, label='close')
-        ax_close.axvline(event_pos, color='red', alpha=0.8)
-        ax_close.scatter([event_pos], [meta['close'][event_pos]], facecolors='none', edgecolors='red', s=70, linewidth=1.5)
+        ax_close.plot(timeline_dates, timeline[self.close_col], color='0.2', linewidth=1.2, label='close')
+        ax_close.axvspan(window_start, window_end, color='green', alpha=0.08, label='attention window')
+        ax_close.axvline(event_ts, color='red', alpha=0.8)
+        ax_close.scatter([event_ts], [meta['close'][event_pos]], facecolors='none', edgecolors='red', s=70, linewidth=1.5)
         ax_close.set_title('Close with selected attention point')
         ax_close.set_ylabel('Close')
         ax_close.grid(True, alpha=0.25)
-        ax_close.legend(loc='upper left')
+        ax_close.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
 
         ax_return = fig.add_subplot(grid[1, :], sharex=ax_close)
         if 'log_return_1d' in self.feature_cols:
-            returns = x_np[:, self.feature_cols.index('log_return_1d')]
+            returns = timeline['log_return_1d'].values
             std = np.nanstd(returns)
-            ax_return.plot(x_axis, returns, color='#1f77b4', linewidth=1.0, label='log_return_1d')
+            ax_return.plot(timeline_dates, returns, color='#1f77b4', linewidth=1.0, label='log_return_1d')
             ax_return.axhline(3 * std, linestyle='--', color='purple', alpha=0.55, label='+3 std')
             ax_return.axhline(-3 * std, linestyle='--', color='purple', alpha=0.55, label='-3 std')
-        ax_return.axvline(event_pos, color='red', alpha=0.8)
-        ax_return.scatter([event_pos], [returns[event_pos] if 'log_return_1d' in self.feature_cols else 0],
+        ax_return.axvspan(window_start, window_end, color='green', alpha=0.08)
+        ax_return.axvline(event_ts, color='red', alpha=0.8)
+        selected_return = timeline.loc[timeline[self.test_loader.dataset.date_col] == event_ts, 'log_return_1d']
+        ax_return.scatter([event_ts], [selected_return.iloc[0] if len(selected_return) else 0],
                           facecolors='none', edgecolors='red', s=70, linewidth=1.5)
         ax_return.set_title('Log return')
         ax_return.set_ylabel('log_return')
         ax_return.grid(True, alpha=0.25)
-        ax_return.legend(loc='upper left')
+        ax_return.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
 
         ax_score = fig.add_subplot(grid[2, :], sharex=ax_close)
-        ax_score.plot(x_axis, score, color='#8c564b', linewidth=1.1, label='anomaly score')
-        ax_score.axvline(event_pos, color='red', alpha=0.8)
-        ax_score.scatter([event_pos], [score[event_pos]], facecolors='none', edgecolors='red', s=70, linewidth=1.5,
-                         label='selected window')
+        ax_score.plot(timeline_dates, timeline['timeline_score'], color='#8c564b', linewidth=1.1, label='anomaly score')
+        over = timeline['timeline_score'] >= threshold
+        for ax in [ax_close, ax_return, ax_score]:
+            for date in timeline_dates[over]:
+                ax.axvline(date, color='red', linestyle='--', linewidth=0.8, alpha=0.18)
+        ax_score.scatter(timeline_dates[over], timeline.loc[over, 'timeline_score'], color='red', s=14,
+                         alpha=0.85, label='score >= threshold')
+        ax_score.axhline(threshold, color='red', linestyle='--', linewidth=1.0, alpha=0.9,
+                         label='threshold Q95')
+        ax_score.axvspan(window_start, window_end, color='green', alpha=0.08)
+        ax_score.axvline(event_ts, color='red', alpha=0.8)
+        selected_score = timeline.loc[timeline[self.test_loader.dataset.date_col] == event_ts, 'timeline_score']
+        ax_score.scatter([event_ts], [selected_score.iloc[0] if len(selected_score) else score[event_pos]],
+                         facecolors='none', edgecolors='red', s=70, linewidth=1.5, label='selected date')
         ax_score.set_title('Anomaly score')
         ax_score.set_ylabel('score')
         ax_score.grid(True, alpha=0.25)
-        ax_score.legend(loc='upper left')
+        ax_score.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
 
         heatmaps = [
             (fig.add_subplot(grid[3, 0]), s_plot, 'Learned series attention (diag masked)'),
@@ -611,6 +667,8 @@ class Solver(object):
             ax.set_xticklabels(tick_labels, rotation=35, ha='right', fontsize=8)
             ax.set_yticks(tick_pos)
             ax.set_yticklabels(tick_labels, fontsize=8)
+            ax.axhline(event_pos, color='red', linewidth=1.0, alpha=0.75)
+            ax.axvline(event_pos, color='red', linewidth=1.0, alpha=0.35)
             fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
 
         ax_row = fig.add_subplot(grid[4, 0])
@@ -639,7 +697,10 @@ class Solver(object):
             'Window dates: {} to {}'.format(dates[0], dates[-1]),
             'Layer/head: {}/{}'.format(layer, self.plot_head),
             'Prior type: {}'.format(self.prior_type),
-            'Score at event: {:.6g}'.format(float(score[event_pos])),
+            'Timeline score at event: {:.6g}'.format(float(selected_score.iloc[0] if len(selected_score) else np.nan)),
+            'Threshold Q95: {:.6g}'.format(float(threshold)),
+            'Ticker days >= threshold: {}'.format(int(np.sum(over))),
+            'Window score at query: {:.6g}'.format(float(score[event_pos])),
             'Association discrepancy: {:.4f}'.format(float(discrepancy[event_pos])),
             'Top attention key date: {}'.format(dates[top_key]),
             'Top attention lag: {}'.format(top_lag),
@@ -660,9 +721,11 @@ class Solver(object):
         ax_feat.grid(True, axis='y', alpha=0.25)
 
         for ax in [ax_close, ax_return, ax_score]:
-            ax.set_xticks(tick_pos)
-            ax.set_xticklabels(tick_labels, rotation=30, ha='right')
-        fig.tight_layout()
+            locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
+            formatter = mdates.ConciseDateFormatter(locator)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        fig.tight_layout(rect=[0, 0, 0.88, 1])
         output = os.path.join(self.output_dir, 'event_case_{}_{}_{}.png'.format(
             self.visualize_ticker, case_name, event_date_text.replace('-', '_')))
         fig.savefig(output, dpi=150)
@@ -713,7 +776,8 @@ class Solver(object):
 
         self.model.load_state_dict(torch.load(
             os.path.join(str(self.model_save_path), str(self.dataset) + '_checkpoint.pth'),
-            map_location=self.device))
+            map_location=self.device,
+            weights_only=True))
 
         if self.auto_case_ticker:
             outputs = []
