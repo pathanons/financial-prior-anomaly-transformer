@@ -115,6 +115,7 @@ class Solver(object):
         'use_return_nll': False,
         'nll_weight': 0.0,
         'score_type': 'original',
+        'score_normalization': 'none',
         'feature_weights': None,
         'score_aggregation': 'mean',
         'threshold_method': 'percentile',
@@ -335,7 +336,24 @@ class Solver(object):
             else:
                 raise ValueError("Unknown score_aggregation: {}".format(self.score_aggregation))
             labels[key] = int(max(label_buckets[key]))
+        timeline = self._normalize_scores(timeline)
         return timeline, labels
+
+    def _normalize_scores(self, scores):
+        if self.score_normalization == 'none':
+            return scores
+        if self.score_normalization != 'ticker_percentile':
+            raise ValueError("Unknown score_normalization: {}".format(self.score_normalization))
+        by_ticker = defaultdict(list)
+        for key, score in scores.items():
+            by_ticker[key[0]].append((key, score))
+        normalized = {}
+        for rows in by_ticker.values():
+            rows = sorted(rows, key=lambda item: item[1])
+            n = len(rows)
+            for rank, (key, _) in enumerate(rows, 1):
+                normalized[key] = rank / n
+        return normalized
 
     def _save_timeline(self, name, scores, labels):
         if not self.run_dir:

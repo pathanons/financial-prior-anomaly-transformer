@@ -112,6 +112,9 @@ def build_stock_features(frame, date_col='date', ticker_col='ticker', open_col='
         g['positive_label'] = ((z_return >= 3.0) | (mad_z_return >= 3.5)).astype(int)
         g['negative_label'] = ((z_return <= -3.0) | (mad_z_return <= -3.5)).astype(int)
         g['absolute_label'] = ((z_return.abs() >= 3.0) | (mad_z_return.abs() >= 3.5)).astype(int)
+        g['return_volume_3std_label'] = ((z_return.abs() >= 3.0) | (g['volume_z'].abs() >= 3.0)).astype(int)
+        g['return_label'] = g['absolute_label']
+        g['volume_label'] = (g['volume_z'] >= 2.0).astype(int)
         g['contextual_label'] = ((g['absolute_label'] == 1) & (
             (g['volume_z'] >= 2.0) | (g['vol_ratio_5_20'] >= 1.5))).astype(int)
         out.append(g)
@@ -169,6 +172,14 @@ def cached_stock_features(data_path, date_col, ticker_col, open_col, high_col, l
             result = result[result[ticker_col].astype(str).isin(ticker_filter)]
             if result.empty:
                 raise ValueError("No cached feature rows matched --tickers {}".format(','.join(ticker_filter)))
+        if 'absolute_label' in result and 'return_label' not in result:
+            result['return_label'] = result['absolute_label']
+        if 'volume_z' in result and 'volume_label' not in result:
+            result['volume_label'] = (result['volume_z'] >= 2.0).astype(int)
+        if 'z_return' in result and 'volume_z' in result and 'return_volume_3std_label' not in result:
+            result['return_volume_3std_label'] = (
+                (result['z_return'].abs() >= 3.0) | (result['volume_z'].abs() >= 3.0)
+            ).astype(int)
         _STOCK_FEATURE_CACHE[key] = result.sort_values([ticker_col, date_col]).reset_index(drop=True)
         print("Built stock feature rows: {}".format(len(_STOCK_FEATURE_CACHE[key])), flush=True)
     else:

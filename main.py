@@ -71,10 +71,13 @@ if __name__ == '__main__':
     parser.add_argument('--nll_weight', type=float, default=0.0)
     parser.add_argument('--score_type', type=str, default='original',
                         choices=['original', 'return_recon', 'return_nll', 'feature_weighted'])
+    parser.add_argument('--score_normalization', type=str, default='none',
+                        choices=['none', 'ticker_percentile'])
     parser.add_argument('--feature_weights', type=str, default=None)
     parser.add_argument('--score_aggregation', type=str, default='mean', choices=['mean', 'max'])
     parser.add_argument('--label_type', type=str, default='absolute',
-                        choices=['positive', 'negative', 'absolute', 'contextual'])
+                        choices=['positive', 'negative', 'absolute', 'return', 'volume', 'contextual',
+                                 'return_volume_3std'])
     parser.add_argument('--threshold_method', type=str, default='percentile', choices=['percentile', 'best_f1'])
     parser.add_argument('--threshold_percentile', type=float, default=99.0)
     parser.add_argument('--top_k', type=int, default=None)
