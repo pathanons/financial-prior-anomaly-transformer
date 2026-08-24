@@ -59,10 +59,10 @@ class VariationalAutoencoder(nn.Module):
 
 
 class LSTMAutoencoder(nn.Module):
-    def __init__(self, dim, hidden=24):
+    def __init__(self, dim, hidden=128, num_layers=2):
         super().__init__()
-        self.encoder = nn.LSTM(dim, hidden, batch_first=True)
-        self.decoder = nn.LSTM(hidden, hidden, batch_first=True)
+        self.encoder = nn.LSTM(dim, hidden, num_layers=num_layers, batch_first=True)
+        self.decoder = nn.LSTM(hidden, hidden, num_layers=num_layers, batch_first=True)
         self.out = nn.Linear(hidden, dim)
 
     def forward(self, x):
@@ -73,21 +73,41 @@ class LSTMAutoencoder(nn.Module):
 
 
 class TransformerAutoencoder(nn.Module):
-    def __init__(self, dim, d_model=32, nhead=4):
+    def __init__(self, dim, d_model=128, nhead=4, num_layers=2):
         super().__init__()
         self.inp = nn.Linear(dim, d_model)
-        layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=64, batch_first=True)
-        self.encoder = nn.TransformerEncoder(layer, num_layers=1)
+        layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=256, batch_first=True)
+        self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
         self.out = nn.Linear(d_model, dim)
 
     def forward(self, x):
         return self.out(self.encoder(self.inp(x)))
 
 
+class Conv1DAutoencoder(nn.Module):
+    def __init__(self, dim, channels=32):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv1d(dim, channels, kernel_size=5, padding=2), nn.ReLU(),
+            nn.Conv1d(channels, channels, kernel_size=5, padding=2), nn.ReLU(),
+        )
+        self.decoder = nn.Sequential(
+            nn.Conv1d(channels, channels, kernel_size=5, padding=2), nn.ReLU(),
+            nn.Conv1d(channels, dim, kernel_size=5, padding=2),
+        )
+
+    def forward(self, x):
+        h = self.encoder(x.transpose(1, 2))
+        out = self.decoder(h)
+        return out.transpose(1, 2)
+
+
 def read_features(feature_dir, features, label_col):
     frames = []
     for path in sorted(Path(feature_dir).glob("*_features.csv")):
         frame = pd.read_csv(path, parse_dates=["date"])
+        if label_col not in frame.columns and label_col == "absolute_z5_label":
+            frame[label_col] = (frame["z_return"].abs() >= 5.0).astype(int)
         if label_col not in frame.columns and label_col == "return_volume_3std_label":
             frame[label_col] = ((frame["z_return"].abs() >= 3.0) | (frame["volume_z"].abs() >= 3.0)).astype(int)
         frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=features + [label_col])
@@ -110,6 +130,13 @@ def sample_rows(x, max_rows, seed):
         return x
     rng = np.random.default_rng(seed)
     return x[rng.choice(len(x), size=max_rows, replace=False)]
+
+
+def reconstruction_error(recon, x, recon_idx):
+    err = (recon - x).pow(2)
+    if recon_idx is not None:
+        err = err[:, recon_idx] if err.ndim == 2 else err[:, :, recon_idx]
+    return err
 
 
 def metrics_from_scores(y_true, y_score, threshold):
@@ -239,7 +266,7 @@ def at_confusions(run_root, out_dir):
     return pd.DataFrame(rows), pd.concat(score_rows, ignore_index=True)
 
 
-def fit_dense_autoencoder(model, x_train, x_val, x_test, epochs, batch_size, device, vae=False):
+def fit_dense_autoencoder(model, x_train, x_val, x_test, epochs, batch_size, device, recon_idx=None, vae=False):
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     loader = DataLoader(TensorDataset(torch.tensor(x_train, dtype=torch.float32)), batch_size=batch_size, shuffle=True)
@@ -249,9 +276,11 @@ def fit_dense_autoencoder(model, x_train, x_val, x_test, epochs, batch_size, dev
             opt.zero_grad()
             if vae:
                 recon, mu, logvar = model(xb)
-                loss = ((recon - xb) ** 2).mean() + 1e-3 * (-0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).mean())
+                err = reconstruction_error(recon, xb, recon_idx)
+                loss = err.mean() + 1e-3 * (-0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).mean())
             else:
-                loss = ((model(xb) - xb) ** 2).mean()
+                err = reconstruction_error(model(xb), xb, recon_idx)
+                loss = err.mean()
             loss.backward()
             opt.step()
 
@@ -259,7 +288,8 @@ def fit_dense_autoencoder(model, x_train, x_val, x_test, epochs, batch_size, dev
         with torch.no_grad():
             xb = torch.tensor(x, dtype=torch.float32, device=device)
             recon = model(xb)[0] if vae else model(xb)
-            return ((recon - xb) ** 2).mean(dim=1).cpu().numpy()
+            err = reconstruction_error(recon, xb, recon_idx)
+            return err.mean(dim=1).cpu().numpy()
 
     return score(x_val), score(x_test)
 
@@ -275,7 +305,7 @@ def make_windows(frame, scaler, features, label_col, win=60):
     return np.asarray(xs, dtype=np.float32), np.asarray(labels, dtype=int)
 
 
-def fit_sequence_autoencoder(model, x_train, x_val, x_test, epochs, batch_size, device):
+def fit_sequence_autoencoder(model, x_train, x_val, x_test, epochs, batch_size, device, recon_idx=None):
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     loader = DataLoader(TensorDataset(torch.tensor(x_train, dtype=torch.float32)), batch_size=batch_size, shuffle=True)
@@ -283,7 +313,8 @@ def fit_sequence_autoencoder(model, x_train, x_val, x_test, epochs, batch_size, 
         for (xb,) in loader:
             xb = xb.to(device)
             opt.zero_grad()
-            loss = ((model(xb) - xb) ** 2).mean()
+            err = reconstruction_error(model(xb), xb, recon_idx)
+            loss = err.mean()
             loss.backward()
             opt.step()
 
@@ -292,7 +323,8 @@ def fit_sequence_autoencoder(model, x_train, x_val, x_test, epochs, batch_size, 
         with torch.no_grad():
             for (xb,) in DataLoader(TensorDataset(torch.tensor(x, dtype=torch.float32)), batch_size=batch_size):
                 xb = xb.to(device)
-                out.append(((model(xb) - xb) ** 2).mean(dim=(1, 2)).cpu().numpy())
+                err = reconstruction_error(model(xb), xb, recon_idx)
+                out.append(err.mean(dim=(1, 2)).cpu().numpy())
         return np.concatenate(out)
 
     return score(x_val), score(x_test)
@@ -300,6 +332,11 @@ def fit_sequence_autoencoder(model, x_train, x_val, x_test, epochs, batch_size, 
 
 def baselines(args, out_dir):
     features = [x.strip() for x in args.features.split(",") if x.strip()]
+    recon_features = [x.strip() for x in args.reconstruction_features.split(",") if x.strip()] if args.reconstruction_features else features
+    missing = [name for name in recon_features if name not in features]
+    if missing:
+        raise ValueError(f"--reconstruction_features not in --features: {','.join(missing)}")
+    recon_idx = None if recon_features == features else [features.index(name) for name in recon_features]
     frame = read_features(args.feature_dir, features, args.label_col)
     train, val, test = split_daily(frame)
     scaler = StandardScaler().fit(train[features].values)
@@ -335,7 +372,8 @@ def baselines(args, out_dir):
         ("Variational Autoencoder", VariationalAutoencoder(len(features)), True),
     ]:
         val_score, test_score = fit_dense_autoencoder(
-            model, x_train_deep, x_val, x_test, args.epochs, args.batch_size, device, vae=vae
+            model, x_train_deep, x_val, x_test, args.epochs, args.batch_size, device,
+            recon_idx=recon_idx, vae=vae
         )
         rows.append({"model": name, **metrics_from_scores(y_test, test_score, np.percentile(val_score, 99))})
         score_rows.append(pd.DataFrame({"model": name, "score": test_score, "label": y_test}))
@@ -347,9 +385,11 @@ def baselines(args, out_dir):
     for name, model in [
         ("LSTM Autoencoder", LSTMAutoencoder(len(features))),
         ("Transformer Autoencoder", TransformerAutoencoder(len(features))),
+        ("1D-CNN Autoencoder", Conv1DAutoencoder(len(features))),
     ]:
         val_score, test_score = fit_sequence_autoencoder(
-            model, seq_train, seq_val, seq_test, args.epochs, args.batch_size, device
+            model, seq_train, seq_val, seq_test, args.epochs, args.batch_size, device,
+            recon_idx=recon_idx
         )
         rows.append({"model": name, **metrics_from_scores(y_seq_test, test_score, np.percentile(val_score, 99))})
         score_rows.append(pd.DataFrame({"model": name, "score": test_score, "label": y_seq_test}))
@@ -364,10 +404,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--feature_dir", default="SP500_features_vw60_lw60")
     parser.add_argument("--features", default=",".join(DEFAULT_FEATURES))
+    parser.add_argument("--reconstruction_features", default="")
     parser.add_argument("--label_col", default="absolute_label")
     parser.add_argument("--run_root", default="D:/multi-prior-at-run")
     parser.add_argument("--out_dir", default="research_paper/weekly/2026-W26/baseline_comparison")
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--max_train_rows", type=int, default=60000)
     parser.add_argument("--max_sequence_rows", type=int, default=20000)

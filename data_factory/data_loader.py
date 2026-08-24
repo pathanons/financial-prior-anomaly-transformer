@@ -95,6 +95,7 @@ def build_stock_features(frame, date_col='date', ticker_col='ticker', open_col='
         g['rolling_vol_20'] = r.rolling(20).std(ddof=0)
         g['vol_ratio_5_20'] = g['rolling_vol_5'] / (g['rolling_vol_20'] + eps)
         g['gap'] = (open_ - prev_close) / (prev_close + eps)
+        g['abs_gap'] = g['gap'].abs()
         g['high_low_range'] = (high - low) / (close + eps)
         g['positive_return'] = r.clip(lower=0.0)
         g['negative_return_magnitude'] = (-r).clip(lower=0.0)
@@ -102,16 +103,10 @@ def build_stock_features(frame, date_col='date', ticker_col='ticker', open_col='
 
         past_mean = past_r.rolling(label_window).mean()
         past_std = past_r.rolling(label_window).std(ddof=0)
-        past_median = past_r.rolling(label_window).median()
-        past_mad = past_r.rolling(label_window).apply(
-            lambda x: np.median(np.abs(x - np.median(x))), raw=True)
         z_return = (r - past_mean) / (past_std + eps)
-        mad_z_return = (r - past_median) / (1.4826 * past_mad + eps)
         g['z_return'] = z_return
-        g['mad_z_return'] = mad_z_return
-        g['positive_label'] = ((z_return >= 3.0) | (mad_z_return >= 3.5)).astype(int)
-        g['negative_label'] = ((z_return <= -3.0) | (mad_z_return <= -3.5)).astype(int)
-        g['absolute_label'] = ((z_return.abs() >= 3.0) | (mad_z_return.abs() >= 3.5)).astype(int)
+        g['absolute_label'] = (z_return.abs() >= 3.0).astype(int)
+        g['absolute_z5_label'] = (z_return.abs() >= 5.0).astype(int)
         g['return_volume_3std_label'] = ((z_return.abs() >= 3.0) | (g['volume_z'].abs() >= 3.0)).astype(int)
         g['return_label'] = g['absolute_label']
         g['volume_label'] = (g['volume_z'] >= 2.0).astype(int)
@@ -172,14 +167,21 @@ def cached_stock_features(data_path, date_col, ticker_col, open_col, high_col, l
             result = result[result[ticker_col].astype(str).isin(ticker_filter)]
             if result.empty:
                 raise ValueError("No cached feature rows matched --tickers {}".format(','.join(ticker_filter)))
-        if 'absolute_label' in result and 'return_label' not in result:
+        if 'z_return' in result:
+            result['absolute_label'] = (result['z_return'].abs() >= 3.0).astype(int)
+            result['absolute_z5_label'] = (result['z_return'].abs() >= 5.0).astype(int)
             result['return_label'] = result['absolute_label']
+            for stale in ['mad_z_return', 'positive_label', 'negative_label']:
+                if stale in result:
+                    result = result.drop(columns=[stale])
         if 'volume_z' in result and 'volume_label' not in result:
             result['volume_label'] = (result['volume_z'] >= 2.0).astype(int)
         if 'z_return' in result and 'volume_z' in result and 'return_volume_3std_label' not in result:
             result['return_volume_3std_label'] = (
                 (result['z_return'].abs() >= 3.0) | (result['volume_z'].abs() >= 3.0)
             ).astype(int)
+        if 'gap' in result and 'abs_gap' not in result:
+            result['abs_gap'] = result['gap'].abs()
         _STOCK_FEATURE_CACHE[key] = result.sort_values([ticker_col, date_col]).reset_index(drop=True)
         print("Built stock feature rows: {}".format(len(_STOCK_FEATURE_CACHE[key])), flush=True)
     else:
@@ -290,203 +292,11 @@ class StockSegLoader(object):
         return self.samples[index], self.labels[index]
 
 
-class PSMSegLoader(object):
-    def __init__(self, data_path, win_size, step, mode="train"):
-        self.mode = mode
-        self.step = step
-        self.win_size = win_size
-        self.scaler = StandardScaler()
-        data = pd.read_csv(data_path + '/train.csv')
-        data = data.values[:, 1:]
-
-        data = np.nan_to_num(data)
-
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
-        test_data = pd.read_csv(data_path + '/test.csv')
-
-        test_data = test_data.values[:, 1:]
-        test_data = np.nan_to_num(test_data)
-
-        self.test = self.scaler.transform(test_data)
-
-        self.train = data
-        self.val = self.test
-
-        self.test_labels = pd.read_csv(data_path + '/test_label.csv').values[:, 1:]
-
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
-
-    def __len__(self):
-        """
-        Number of images in the object dataset.
-        """
-        if self.mode == "train":
-            return (self.train.shape[0] - self.win_size) // self.step + 1
-        elif (self.mode == 'val'):
-            return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.mode == 'test'):
-            return (self.test.shape[0] - self.win_size) // self.step + 1
-        else:
-            return (self.test.shape[0] - self.win_size) // self.win_size + 1
-
-    def __getitem__(self, index):
-        index = index * self.step
-        if self.mode == "train":
-            return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.mode == 'val'):
-            return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.mode == 'test'):
-            return np.float32(self.test[index:index + self.win_size]), np.float32(
-                self.test_labels[index:index + self.win_size])
-        else:
-            return np.float32(self.test[
-                              index // self.step * self.win_size:index // self.step * self.win_size + self.win_size]), np.float32(
-                self.test_labels[index // self.step * self.win_size:index // self.step * self.win_size + self.win_size])
-
-
-class MSLSegLoader(object):
-    def __init__(self, data_path, win_size, step, mode="train"):
-        self.mode = mode
-        self.step = step
-        self.win_size = win_size
-        self.scaler = StandardScaler()
-        data = np.load(data_path + "/MSL_train.npy")
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
-        test_data = np.load(data_path + "/MSL_test.npy")
-        self.test = self.scaler.transform(test_data)
-
-        self.train = data
-        self.val = self.test
-        self.test_labels = np.load(data_path + "/MSL_test_label.npy")
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
-
-    def __len__(self):
-
-        if self.mode == "train":
-            return (self.train.shape[0] - self.win_size) // self.step + 1
-        elif (self.mode == 'val'):
-            return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.mode == 'test'):
-            return (self.test.shape[0] - self.win_size) // self.step + 1
-        else:
-            return (self.test.shape[0] - self.win_size) // self.win_size + 1
-
-    def __getitem__(self, index):
-        index = index * self.step
-        if self.mode == "train":
-            return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.mode == 'val'):
-            return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.mode == 'test'):
-            return np.float32(self.test[index:index + self.win_size]), np.float32(
-                self.test_labels[index:index + self.win_size])
-        else:
-            return np.float32(self.test[
-                              index // self.step * self.win_size:index // self.step * self.win_size + self.win_size]), np.float32(
-                self.test_labels[index // self.step * self.win_size:index // self.step * self.win_size + self.win_size])
-
-
-class SMAPSegLoader(object):
-    def __init__(self, data_path, win_size, step, mode="train"):
-        self.mode = mode
-        self.step = step
-        self.win_size = win_size
-        self.scaler = StandardScaler()
-        data = np.load(data_path + "/SMAP_train.npy")
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
-        test_data = np.load(data_path + "/SMAP_test.npy")
-        self.test = self.scaler.transform(test_data)
-
-        self.train = data
-        self.val = self.test
-        self.test_labels = np.load(data_path + "/SMAP_test_label.npy")
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
-
-    def __len__(self):
-
-        if self.mode == "train":
-            return (self.train.shape[0] - self.win_size) // self.step + 1
-        elif (self.mode == 'val'):
-            return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.mode == 'test'):
-            return (self.test.shape[0] - self.win_size) // self.step + 1
-        else:
-            return (self.test.shape[0] - self.win_size) // self.win_size + 1
-
-    def __getitem__(self, index):
-        index = index * self.step
-        if self.mode == "train":
-            return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.mode == 'val'):
-            return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.mode == 'test'):
-            return np.float32(self.test[index:index + self.win_size]), np.float32(
-                self.test_labels[index:index + self.win_size])
-        else:
-            return np.float32(self.test[
-                              index // self.step * self.win_size:index // self.step * self.win_size + self.win_size]), np.float32(
-                self.test_labels[index // self.step * self.win_size:index // self.step * self.win_size + self.win_size])
-
-
-class SMDSegLoader(object):
-    def __init__(self, data_path, win_size, step, mode="train"):
-        self.mode = mode
-        self.step = step
-        self.win_size = win_size
-        self.scaler = StandardScaler()
-        data = np.load(data_path + "/SMD_train.npy")
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
-        test_data = np.load(data_path + "/SMD_test.npy")
-        self.test = self.scaler.transform(test_data)
-        self.train = data
-        data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8):]
-        self.test_labels = np.load(data_path + "/SMD_test_label.npy")
-
-    def __len__(self):
-
-        if self.mode == "train":
-            return (self.train.shape[0] - self.win_size) // self.step + 1
-        elif (self.mode == 'val'):
-            return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.mode == 'test'):
-            return (self.test.shape[0] - self.win_size) // self.step + 1
-        else:
-            return (self.test.shape[0] - self.win_size) // self.win_size + 1
-
-    def __getitem__(self, index):
-        index = index * self.step
-        if self.mode == "train":
-            return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.mode == 'val'):
-            return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.mode == 'test'):
-            return np.float32(self.test[index:index + self.win_size]), np.float32(
-                self.test_labels[index:index + self.win_size])
-        else:
-            return np.float32(self.test[
-                              index // self.step * self.win_size:index // self.step * self.win_size + self.win_size]), np.float32(
-                self.test_labels[index // self.step * self.win_size:index // self.step * self.win_size + self.win_size])
-
-
-def get_loader_segment(data_path, batch_size, win_size=100, step=100, mode='train', dataset='KDD', **kwargs):
-    if (dataset == 'SMD'):
-        dataset = SMDSegLoader(data_path, win_size, step, mode)
-    elif (dataset == 'MSL'):
-        dataset = MSLSegLoader(data_path, win_size, 1, mode)
-    elif (dataset == 'SMAP'):
-        dataset = SMAPSegLoader(data_path, win_size, 1, mode)
-    elif (dataset == 'PSM'):
-        dataset = PSMSegLoader(data_path, win_size, 1, mode)
-    elif (dataset == 'STOCK'):
+def get_loader_segment(data_path, batch_size, win_size=100, step=100, mode='train', dataset='STOCK', **kwargs):
+    if (dataset == 'STOCK'):
         dataset = StockSegLoader(data_path, win_size, step, mode, **kwargs)
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset!r}")
 
     shuffle = False
     if mode == 'train':

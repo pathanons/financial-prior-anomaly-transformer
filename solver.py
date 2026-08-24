@@ -53,9 +53,10 @@ def association_losses(series_list, prior_list):
     return series_loss / len(series_list), prior_loss / len(series_list)
 
 
-def reconstruction_error(x, x_hat, return_idx):
+def reconstruction_error(x, x_hat, return_idx, reconstruction_indices=None):
     feature_error = (x - x_hat) ** 2
-    return feature_error.mean(dim=-1), feature_error[:, :, return_idx], feature_error, feature_error.mean()
+    rec_error = feature_error if reconstruction_indices is None else feature_error[:, :, reconstruction_indices]
+    return rec_error.mean(dim=-1), feature_error[:, :, return_idx], feature_error, rec_error.mean()
 
 
 def return_nll(return_params, r, eps=1e-8):
@@ -108,6 +109,10 @@ class Solver(object):
     DEFAULTS = {
         'stride': 1,
         'prior_type': 'time',
+        'state_projection_dim': 0,
+        'token_embedding': 'conv3_circular',
+        'use_positional_embedding': True,
+        'position_sigma': 0.0,
         'features': ','.join(DEFAULT_STOCK_FEATURES),
         'z_state_features': 'log_return_1d,abs_return,volume_z,rolling_vol_5,rolling_vol_20,vol_ratio_5_20',
         'label_type': 'absolute',
@@ -117,6 +122,8 @@ class Solver(object):
         'score_type': 'original',
         'score_normalization': 'none',
         'feature_weights': None,
+        'reconstruction_features': None,
+        'calibrated_score_features': 'log_return_1d,volume_z,gap',
         'score_aggregation': 'mean',
         'threshold_method': 'percentile',
         'threshold_percentile': 99.0,
@@ -152,6 +159,13 @@ class Solver(object):
             self.input_c = len(self.feature_cols)
             self.output_c = len(self.feature_cols)
         self.return_idx = self.feature_cols.index('log_return_1d') if 'log_return_1d' in self.feature_cols else 0
+        reconstruction_cols = _csv(self.reconstruction_features, self.feature_cols)
+        missing_reconstruction = [name for name in reconstruction_cols if name not in self.feature_cols]
+        if missing_reconstruction:
+            raise ValueError("--reconstruction_features not in --features: {}".format(','.join(missing_reconstruction)))
+        self.reconstruction_indices = [self.feature_cols.index(name) for name in reconstruction_cols]
+        if len(self.reconstruction_indices) == len(self.feature_cols):
+            self.reconstruction_indices = None
         self.feature_weight_values = None
         self.plot_threshold = None
         if self.feature_weights:
@@ -160,6 +174,17 @@ class Solver(object):
                 raise ValueError("--feature_weights must match the number of --features")
         self.z_state_indices = [self.feature_cols.index(name) for name in _csv(self.z_state_features, [])
                                 if name in self.feature_cols]
+        missing_calibrated = [
+            name for name in _csv(self.calibrated_score_features, [])
+            if name not in self.feature_cols
+        ]
+        if missing_calibrated:
+            raise ValueError("--calibrated_score_features not in --features: {}".format(
+                ','.join(missing_calibrated)))
+        self.calibrated_score_indices = [
+            self.feature_cols.index(name) for name in _csv(self.calibrated_score_features, [])
+        ]
+        self.calibrated_score_names = ['original'] + _csv(self.calibrated_score_features, [])
         self.train_loader = self._loader('train')
         self.vali_loader = self._loader('val')
         self.test_loader = self._loader('test')
@@ -184,8 +209,13 @@ class Solver(object):
 
     def build_model(self):
         self.model = AnomalyTransformer(
-            win_size=self.win_size, enc_in=self.input_c, c_out=self.output_c, e_layers=3,
+            win_size=self.win_size, enc_in=self.input_c, c_out=self.output_c,
+            d_model=self.d_model, n_heads=self.n_heads, e_layers=self.e_layers, d_ff=self.d_ff,
             prior_type=self.prior_type, z_state_indices=self.z_state_indices,
+            state_projection_dim=self.state_projection_dim,
+            token_embedding=self.token_embedding, feature_names=self.feature_cols,
+            use_positional_embedding=self.use_positional_embedding,
+            position_sigma=self.position_sigma,
             use_return_nll=self.use_return_nll)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         self.model.to(self.device)
@@ -193,13 +223,15 @@ class Solver(object):
     def _forward_losses(self, input_data):
         x = input_data.float().to(self.device)
         x_hat, series, prior, prior_params, return_params = self.model(x)
-        rec_point, return_point, feature_error, rec_loss = reconstruction_error(x, x_hat, self.return_idx)
+        rec_point, return_point, feature_error, rec_loss = reconstruction_error(
+            x, x_hat, self.return_idx, self.reconstruction_indices)
         l_return = return_point.mean()
         l_nll = torch.tensor(0.0, device=self.device)
         nll_point = None
         if self.use_return_nll:
             nll_point, l_nll, _, _ = return_nll(return_params, x[:, :, self.return_idx])
-        l_base = rec_loss + float(self.return_loss_weight) * l_return + float(self.nll_weight) * l_nll
+        l_base = (rec_loss + float(self.return_loss_weight) * l_return
+                  + float(self.nll_weight) * l_nll)
         series_loss, prior_loss = association_losses(series, prior)
         return {
             'x': x, 'x_hat': x_hat, 'series': series, 'prior': prior,
@@ -279,9 +311,12 @@ class Solver(object):
             writer.writeheader()
             writer.writerows(rows)
 
-    def compute_anomaly_score(self, out):
+    def _association_weight(self, out):
         assdis = association_point(out['series'], out['prior'])
-        weight = torch.softmax(-assdis, dim=1)
+        return torch.softmax(-assdis, dim=1)
+
+    def compute_anomaly_score(self, out):
+        weight = self._association_weight(out)
         if self.score_type == 'original':
             error = out['rec_point']
         elif self.score_type == 'return_recon':
@@ -296,9 +331,17 @@ class Solver(object):
             else:
                 weights = torch.tensor(self.feature_weight_values, device=self.device, dtype=out['feature_error'].dtype)
             error = torch.sum(out['feature_error'] * weights, dim=-1) / weights.sum()
+        elif self.score_type == 'calibrated_components':
+            error = out['rec_point']
         else:
             raise ValueError("Unknown score_type: {}".format(self.score_type))
         return error * weight
+
+    def compute_component_scores(self, out):
+        weight = self._association_weight(out)
+        parts = [out['rec_point']]
+        parts.extend(out['feature_error'][:, :, idx] for idx in self.calibrated_score_indices)
+        return torch.stack(parts, dim=-1) * weight.unsqueeze(-1)
 
     def _window_outputs(self, loader):
         self.model.eval()
@@ -338,6 +381,58 @@ class Solver(object):
             labels[key] = int(max(label_buckets[key]))
         timeline = self._normalize_scores(timeline)
         return timeline, labels
+
+    def aggregate_window_component_scores(self, loader):
+        self.model.eval()
+        buckets = defaultdict(list)
+        label_buckets = defaultdict(list)
+        sample_start = 0
+        with torch.no_grad():
+            for input_data, batch_labels in loader:
+                out = self._forward_losses(input_data)
+                batch_scores = self.compute_component_scores(out).detach().cpu().numpy()
+                batch_size = batch_scores.shape[0]
+                batch_meta = loader.dataset.metadata[sample_start:sample_start + batch_size]
+                sample_start += batch_size
+                for scores, labels, meta in zip(batch_scores, batch_labels.numpy(), batch_meta):
+                    ticker = meta['ticker']
+                    for date, score, label in zip(meta['dates'], scores, labels):
+                        key = (ticker, date)
+                        buckets[key].append(score.astype(float))
+                        label_buckets[key].append(int(label))
+        timeline = {}
+        labels = {}
+        for key, values in buckets.items():
+            values = np.stack(values)
+            if self.score_aggregation == 'max':
+                timeline[key] = values.max(axis=0)
+            elif self.score_aggregation == 'mean':
+                timeline[key] = values.mean(axis=0)
+            else:
+                raise ValueError("Unknown score_aggregation: {}".format(self.score_aggregation))
+            labels[key] = int(max(label_buckets[key]))
+        return timeline, labels
+
+    def calibrated_component_scores(self, val_components, test_components):
+        val_keys = list(val_components.keys())
+        test_keys = list(test_components.keys())
+        val_matrix = np.stack([val_components[key] for key in val_keys])
+        test_matrix = np.stack([test_components[key] for key in test_keys])
+        calibrated = np.zeros_like(test_matrix, dtype=float)
+        for col in range(test_matrix.shape[1]):
+            reference = np.sort(val_matrix[:, col])
+            calibrated[:, col] = np.searchsorted(reference, test_matrix[:, col], side='right') / len(reference)
+        return {
+            key: float(row.max())
+            for key, row in zip(test_keys, calibrated)
+        }
+
+    def _evaluate_calibrated_components(self):
+        val_components, val_labels = self.aggregate_window_component_scores(self.vali_loader)
+        test_components, test_labels = self.aggregate_window_component_scores(self.test_loader)
+        val_scores = self.calibrated_component_scores(val_components, val_components)
+        test_scores = self.calibrated_component_scores(val_components, test_components)
+        return val_scores, val_labels, test_scores, test_labels
 
     def _normalize_scores(self, scores):
         if self.score_normalization == 'none':
@@ -490,8 +585,11 @@ class Solver(object):
         plt.close(fig)
 
     def evaluate(self):
-        val_scores, val_labels = self.aggregate_window_scores(self.vali_loader)
-        test_scores, test_labels = self.aggregate_window_scores(self.test_loader)
+        if self.score_type == 'calibrated_components':
+            val_scores, val_labels, test_scores, test_labels = self._evaluate_calibrated_components()
+        else:
+            val_scores, val_labels = self.aggregate_window_scores(self.vali_loader)
+            test_scores, test_labels = self.aggregate_window_scores(self.test_loader)
         self._save_timeline('val', val_scores, val_labels)
         self._save_timeline('test', test_scores, test_labels)
         threshold = self._threshold(val_scores, val_labels)

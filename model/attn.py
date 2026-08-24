@@ -41,14 +41,22 @@ class AnomalyAttention(nn.Module):
         logits = -(d_time ** 2) / (2.0 * sigma ** 2)
         return torch.softmax(logits, dim=-1), {'sigma': sigma, 'tau': None, 'lambda': None}
 
-    def _finance_prior(self, sigma, tau, lam, x_state, window_size):
+    def _state_distance(self, x_state):
         if x_state is None:
-            raise ValueError("time_state prior requires x_state")
+            raise ValueError("{} prior requires x_state".format(self.prior_type))
+        state = x_state[:, :, self.z_state_indices] if self.z_state_indices else x_state
+        return torch.cdist(state, state, p=2).pow(2).unsqueeze(1)
+
+    def _state_prior(self, tau, x_state):
+        tau = self._reshape_param(tau)
+        logits = -self._state_distance(x_state) / (2.0 * tau ** 2)
+        return torch.softmax(logits, dim=-1), {'sigma': None, 'tau': tau, 'lambda': None}
+
+    def _finance_prior(self, sigma, tau, lam, x_state, window_size):
         sigma = self._reshape_param(sigma)
         tau = self._reshape_param(tau)
         lam = self._reshape_param(lam)
-        state = x_state[:, :, self.z_state_indices] if self.z_state_indices else x_state
-        d_state = torch.cdist(state, state, p=2).pow(2).unsqueeze(1)
+        d_state = self._state_distance(x_state)
         d_time = self.distances[:window_size, :window_size].view(1, 1, window_size, window_size)
         time_term = -(d_time ** 2) / (2.0 * sigma ** 2)
         state_term = -lam * d_state / (2.0 * tau ** 2)
@@ -72,6 +80,8 @@ class AnomalyAttention(nn.Module):
             prior, prior_params = self._time_prior(sigma, window_size)
         elif self.prior_type == 'time_state':
             prior, prior_params = self._finance_prior(sigma, tau, lam, x_state, window_size)
+        elif self.prior_type == 'state':
+            prior, prior_params = self._state_prior(tau, x_state)
         else:
             raise ValueError("Unknown prior_type: {}".format(self.prior_type))
 

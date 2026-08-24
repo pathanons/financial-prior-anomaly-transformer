@@ -58,13 +58,29 @@ class Encoder(nn.Module):
 class AnomalyTransformer(nn.Module):
     def __init__(self, win_size, enc_in, c_out, d_model=512, n_heads=8, e_layers=3, d_ff=512,
                  dropout=0.0, activation='gelu', output_attention=True, prior_type='time',
-                 z_state_indices=None, use_return_nll=False):
+                 z_state_indices=None, state_projection_dim=0, token_embedding='conv3_circular',
+                 feature_names=None, use_positional_embedding=True, position_sigma=0.0,
+                 use_return_nll=False):
         super(AnomalyTransformer, self).__init__()
         self.output_attention = output_attention
         self.use_return_nll = use_return_nll
+        self.z_state_indices = z_state_indices
+        state_projection_dim = int(state_projection_dim or 0)
+        state_input_dim = len(z_state_indices) if z_state_indices else enc_in
+        self.state_projection = None
+        if state_projection_dim > 0:
+            self.state_projection = nn.Sequential(
+                nn.Linear(state_input_dim, state_projection_dim),
+                nn.LayerNorm(state_projection_dim)
+            )
 
         # Encoding
-        self.embedding = DataEmbedding(enc_in, d_model, dropout)
+        self.embedding = DataEmbedding(enc_in, d_model, dropout,
+                                       token_embedding=token_embedding,
+                                       feature_names=feature_names,
+                                       use_positional_embedding=use_positional_embedding,
+                                       position_sigma=position_sigma)
+        attention_state_indices = None if self.state_projection is not None else z_state_indices
 
         # Encoder
         self.encoder = Encoder(
@@ -73,7 +89,7 @@ class AnomalyTransformer(nn.Module):
                     AttentionLayer(
                         AnomalyAttention(win_size, False, attention_dropout=dropout,
                                          output_attention=output_attention, prior_type=prior_type,
-                                         z_state_indices=z_state_indices),
+                                         z_state_indices=attention_state_indices),
                         d_model, n_heads),
                     d_model,
                     d_ff,
@@ -91,7 +107,11 @@ class AnomalyTransformer(nn.Module):
 
     def forward(self, x):
         enc_out = self.embedding(x)
-        hidden, series, prior, prior_params = self.encoder(enc_out, x_state=x)
+        x_state = x
+        if self.state_projection is not None:
+            x_state = x[:, :, self.z_state_indices] if self.z_state_indices else x
+            x_state = self.state_projection(x_state)
+        hidden, series, prior, prior_params = self.encoder(enc_out, x_state=x_state)
         enc_out = self.projection(hidden)
         return_params = None
         if self.use_return_nll:
